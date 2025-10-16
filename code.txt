@@ -1,0 +1,1053 @@
+<!doctype html>
+<html lang="id">
+<head>
+    <meta charset="utf-8" />
+    <title>Admin — Generate QR Izin</title>
+
+    <!-- Guard: hanya admin -->
+    <script src="./js/auth.js"></script>
+    <script>
+        (function () {
+            const s = window.Auth?.getSession?.() || null;
+            if (!s || s.role !== 'admin') location.replace('./index.html');
+        })();
+    </script>
+
+    <!-- Style ringkas -->
+    <style>
+        :root {
+            color-scheme: light dark;
+        }
+
+        body {
+            font-family: system-ui, Arial, sans-serif;
+            margin: 0;
+            padding: 24px;
+        }
+
+        .wrap {
+            max-width: 880px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            margin: 0 0 8px;
+        }
+
+        .small {
+            color: #666;
+            font-size: .95rem;
+            margin-bottom: 16px;
+        }
+
+        .card {
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 16px;
+            margin: 16px 0;
+            background: #fff;
+        }
+
+        label {
+            display: block;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+
+        input, textarea, button {
+            width: 100%;
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid #e5e7eb;
+            margin-top: 6px;
+            font: inherit;
+            background: #fff;
+        }
+
+        textarea {
+            min-height: 120px;
+        }
+
+        .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 12px;
+        }
+
+        .btn {
+            background: #111827;
+            color: #fff;
+            border-color: #111827;
+            cursor: pointer;
+        }
+
+        .qrbox {
+            display: flex;
+            gap: 16px;
+            align-items: flex-start;
+            margin-top: 12px;
+            flex-wrap: wrap;
+        }
+
+        .qrview {
+            width: 256px;
+            height: 256px;
+            border: 1px dashed #cbd5e1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            background: #fff;
+        }
+
+        .muted {
+            color: #6b7280;
+        }
+    </style>
+
+    <!-- QRCode lib (CDN) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+
+<body>
+    <div class="wrap">
+        <h1>Admin — Generate QR (tanpa JSON)</h1>
+        <p class="small">QR akan berisi string ringkas: <code>id|date|token</code>. Penandatanganan tetap ECDSA P-256 (SHA-256). Private key tidak ikut QR.</p>
+
+        <div class="card">
+            <div class="row">
+                <div>
+                    <label>Private Key (PEM PKCS#8)</label>
+                    <textarea id="pem" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"></textarea>
+                </div>
+                <div>
+                    <label>ID Pekerja</label>
+                    <input id="workerId" placeholder="mis. PEKERJA-001" />
+                    <label>Tanggal</label>
+                    <input id="workDate" type="date" />
+                    <label>QR JSON (debug, opsional)</label>
+                    <textarea id="qrJson" placeholder='{"id":"PEKERJA-001","date":"2025-09-24","token":"..."}'></textarea>
+                </div>
+            </div>
+
+            <div class="actions">
+                <button class="btn" id="btnSignAndBuild">Generate + Sign → QR</button>
+                <button class="btn" id="btnCopyCompact">Copy Payload (id|date|token)</button>
+                <button class="btn" id="btnDownloadPng">Download PNG</button>
+            </div>
+
+            <div class="qrbox">
+                <div id="qr" class="qrview"><span class="muted">QR akan muncul di sini</span></div>
+                <div>
+                    <p class="muted" id="status"></p>
+                    <p class="muted">Catatan: Token berbeda tiap generate (ECDSA non-deterministic).</p>
+                </div>
+            </div>
+        </div>
+
+        <button onclick="sessionStorage.removeItem('qrizin_session_v1');location.href='./index.html'">Keluar</button>
+    </div>
+
+    <script>
+        const $ = (id) => document.getElementById(id);
+        const enc = new TextEncoder();
+        const statusEl = $('status');
+
+        // ==== helpers (PEM, base64url, sign) ====
+        function pemToArrayBuffer(pem) {
+            const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+            const bin = atob(b64);
+            const buf = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+            return buf.buffer;
+        }
+        function b64urlFromBytes(bytes) {
+            let bin = ''; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+            return btoa(bin).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+        }
+        async function importPkcs8Ecdsa(pemPkcs8) {
+            const keyData = pemToArrayBuffer(pemPkcs8);
+            return crypto.subtle.importKey('pkcs8', keyData, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+        }
+        async function signToken(pem, id, date) {
+            const key = await importPkcs8Ecdsa(pem);
+            const msg = `${id}|${date}`;
+            const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, enc.encode(msg));
+            return b64urlFromBytes(new Uint8Array(sig));
+        }
+
+        // ==== QR ====
+        function buildQR(text) {
+            const el = $('qr');
+            el.innerHTML = '';
+            new QRCode(el, { text, width: 256, height: 256, correctLevel: QRCode.CorrectLevel.L });
+        }
+
+        // ==== util baru: ambil sumber data (textarea jika ada, jika tidak pakai input) ====
+        function getObjFromTextareaOrInputs() {
+            const raw = $('qrJson').value.trim();
+            if (raw) {
+                try {
+                    const o = JSON.parse(raw);
+                    // pastikan field minimal ada
+                    return { id: (o.id || '').trim(), date: (o.date || '').trim(), token: (o.token || '').trim() };
+                } catch {
+                    // kalau user isi bukan JSON valid, abaikan & jatuh ke inputs
+                }
+            }
+            // fallback ke input form
+            return { id: $('workerId').value.trim(), date: $('workDate').value, token: '' };
+        }
+
+        // ==== Actions ====
+        $('btnSignAndBuild').onclick = async () => {
+            try {
+                const pem = $('pem').value.trim();
+                let obj = getObjFromTextareaOrInputs();
+
+                if (!obj.id || !obj.date) { alert('Isi ID & Tanggal (atau JSON valid di textarea).'); return; }
+
+                // jika ada private key → selalu buat token baru (override token lama agar fresh)
+                if (pem) {
+                    obj.token = await signToken(pem, obj.id, obj.date);
+                }
+
+                // simpan JSON debug (struktur lama) tanpa mengubah tampilan
+                $('qrJson').value = JSON.stringify(obj);
+
+                // QR TANPA JSON
+                const compact = `${obj.id}|${obj.date}|${obj.token || ''}`;
+                buildQR(compact);
+
+                statusEl.textContent = obj.token ? 'QR + token dibuat (ringkas).' : 'QR (tanpa token) dibuat (ringkas).';
+            } catch (e) {
+                console.error(e); alert(e.message || e);
+            }
+        };
+
+        $('btnCopyCompact').onclick = async () => {
+            try {
+                // ambil dari JSON debug supaya konsisten
+                const obj = (function () {
+                    try { return JSON.parse($('qrJson').value || '{}'); } catch { return {}; }
+                })();
+                const compact = `${(obj.id || '').trim()}|${(obj.date || '').trim()}|${(obj.token || '').trim()}`;
+                await navigator.clipboard.writeText(compact);
+                statusEl.textContent = 'Payload (id|date|token) disalin.';
+            } catch { statusEl.textContent = 'Gagal menyalin.'; }
+        };
+
+        $('btnDownloadPng').onclick = () => {
+            const cvs = $('qr').querySelector('canvas');
+            if (!cvs) { alert('QR belum dibuat.'); return; }
+            const a = document.createElement('a');
+            a.href = cvs.toDataURL('image/png'); a.download = 'qr-izin.png'; a.click();
+        };
+
+        // set default tanggal = hari ini
+        (function setToday() {
+            const d = new Date(); const pad = n => String(n).padStart(2, '0');
+            $('workDate').value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        })();
+    </script>
+</body>
+</html>
+
+
+
+
+<!doctype html>
+<html lang="id">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Admin — Generate QR Izin</title>
+    <link rel="manifest" href="./manifest.json" />
+    <style>
+        body {
+            font-family: system-ui,Arial;
+            padding: 18px;
+            max-width: 900px;
+            margin: auto;
+        }
+
+        .card {
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 14px;
+        }
+
+        label {
+            display: block;
+            margin-top: 8px;
+            font-weight: 600
+        }
+
+        input, textarea, button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 6px;
+            border-radius: 8px;
+            border: 1px solid #e5e7eb
+        }
+
+        button {
+            cursor: pointer;
+            background: #111827;
+            color: #fff;
+            border-color: #111827
+        }
+
+        .row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap
+        }
+
+        #qrcode {
+            width: 200px;
+            height: 200px;
+            border: 1px dashed #e5e7eb;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 8px
+        }
+
+        .small {
+            color: #666;
+            font-size: .9rem
+        }
+    </style>
+</head>
+<body>
+    <h1>Admin — Generate QR</h1>
+    <p class="small">Token harian = ECDSA P-256 (SHA-256) atas string: <code>id|date</code>. Private key ditempel saat generate (tidak disimpan).</p>
+
+    <div class="card">
+        <label>Private Key (PEM PKCS#8)</label>
+        <textarea id="priPem" rows="8" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"></textarea>
+
+        <div class="row">
+            <div style="flex:1">
+                <label>ID Pekerja</label>
+                <input id="workerId" type="text" placeholder="PEKERJA-001" />
+            </div>
+            <div style="flex:1">
+                <label>Tanggal</label>
+                <input id="dateInput" type="date" />
+            </div>
+        </div>
+
+        <label>QR JSON</label>
+        <textarea id="qrJson" rows="6" readonly></textarea>
+
+        <div class="row" style="margin-top:8px;">
+            <button id="genBtn">Generate + Sign → QR</button>
+            <button id="copyBtn">Copy JSON</button>
+            <button id="dlBtn">Download PNG</button>
+        </div>
+
+        <div id="qrcode" style="margin-top:10px;"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="./js/crypto-utils.js"></script>
+    <script>
+        const workerId = document.getElementById('workerId');
+        const dateInput = document.getElementById('dateInput');
+        const priPem = document.getElementById('priPem');
+        const qrJson = document.getElementById('qrJson');
+        const genBtn = document.getElementById('genBtn');
+        const copyBtn = document.getElementById('copyBtn');
+        const dlBtn = document.getElementById('dlBtn');
+        const qrcodeDiv = document.getElementById('qrcode');
+
+        dateInput.value = new Date().toISOString().slice(0, 10);
+
+        // [NEW] helper: pastikan token base64 → base64url agar aman untuk QR ringkas
+        function toBase64Url(b64) {
+            return b64.replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+        }
+
+        genBtn.onclick = async () => {
+            if (!priPem.value.trim() || !workerId.value.trim() || !dateInput.value) { alert('Lengkapi data.'); return; }
+
+            const pri = await CryptoUtils.importPrivateKeyPem(priPem.value.trim());
+            const msg = `${workerId.value.trim()}|${dateInput.value}`;
+            let token = await CryptoUtils.signP256(pri, CryptoUtils.textEnc(msg));
+
+            // [NEW] jika library mengembalikan base64 standar, ubah ke base64url
+            if (typeof token === 'string') token = toBase64Url(token);
+
+            // Tetap tampilkan JSON di textarea (tidak mengubah UI/flow lama)
+            const payload = { id: workerId.value.trim(), date: dateInput.value, token };
+            const json = JSON.stringify(payload);
+            qrJson.value = json;
+
+            // [NEW] QR DIPERSINGKAT: id|date|token (tanpa JSON)
+            const compact = `${payload.id}|${payload.date}|${payload.token}`;
+
+            qrcodeDiv.innerHTML = '';
+            new QRCode(qrcodeDiv, { text: compact, width: 180, height: 180 }); // ukuran tetap
+        };
+
+        copyBtn.onclick = () => {
+            if (!qrJson.value) return;
+            navigator.clipboard.writeText(qrJson.value);
+            alert('JSON disalin.');
+        };
+
+        dlBtn.onclick = () => {
+            const img = qrcodeDiv.querySelector('img') || qrcodeDiv.querySelector('canvas');
+            if (!img) { alert('Generate dulu.'); return; }
+            let dataUrl;
+            if (img.tagName.toLowerCase() === 'img') {
+                const c = document.createElement('canvas');
+                c.width = img.naturalWidth; c.height = img.naturalHeight;
+                c.getContext('2d').drawImage(img, 0, 0);
+                dataUrl = c.toDataURL('image/png');
+            } else { dataUrl = img.toDataURL('image/png'); }
+            const a = document.createElement('a'); a.href = dataUrl; a.download = 'izin-kerja-qr.png'; a.click();
+        };
+    </script>
+</body>
+</html>
+
+
+< !--pastikan di scanner.html kamu sudah memuat jsQR & auth seperti sebelumnya-- >
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script src="./js/auth.js"></script>
+<script src="./js/scanner.js"></script>
+
+// ========== CONFIG ==========
+// Taruh public key (SPKI PEM) di sini. Jangan kosong kalau mau verifikasi.
+window.QR_CFG = window.QR_CFG || {};
+window.QR_CFG.PUBLIC_KEY_PEM = window.QR_CFG.PUBLIC_KEY_PEM || `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEST+CuutOqfMDM3w3uB3ewzrmgHFj
+fzTShYZBlcbR1Z6qdpC8l3IiYVW+RmSsHaq8S7zdBSzDT5JTUuNgBtMTOA==
+-----END PUBLIC KEY-----`;
+// ============================
+
+(function () {
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('qrCanvas');
+    const ctx = canvas.getContext('2d');
+    const startBtn = document.getElementById('startCamBtn');
+    const stopBtn = document.getElementById('stopCamBtn');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const fileInput = document.getElementById('fileInput');
+    const resultText = document.getElementById('resultText');
+    const parsedJson = document.getElementById('parsedJson');
+
+    if (!window.jsQR) alert('Gagal akses kamera: jsQR is not defined');
+
+    const enc = new TextEncoder();
+    let stream = null, rafId = null, scanning = false;
+
+    function setStatus(text, cls) {
+        resultText.textContent = text;
+        resultText.className = 'small' + (cls ? ' ' + cls : '');
+    }
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // ------------------ helpers: base64 ------------------
+    const b64uToB = (s) => {
+        const b64 = (s || '').replace(/-/g, '+').replace(/_/g, '/');
+        const pad = b64.length % 4 ? '='.repeat(4 - (b64.length % 4)) : '';
+        const bin = atob(b64 + pad);
+        const u = new Uint8Array(bin.length);
+        for (let i = 0; i < u.length; i++) u[i] = bin.charCodeAt(i);
+        return u;
+    };
+    const b64ToB = (s) => {
+        const bin = atob(s);
+        const u = new Uint8Array(bin.length);
+        for (let i = 0; i < u.length; i++) u[i] = bin.charCodeAt(i);
+        return u;
+    };
+    const BtoB64 = (u8) => {
+        let bin = ''; for (let i = 0; i < u8.length; i++) bin += String.fromCharCode(u8[i]);
+        return btoa(bin);
+    };
+
+    // ------------------ helpers: DER/P1363 ------------------
+    function trimLeadingZeros(x) {
+        let i = 0; while (i < x.length - 1 && x[i] === 0) i++;
+        return x.slice(i);
+    }
+    function intToDer(x) {
+        let v = trimLeadingZeros(x);
+        if (v[0] & 0x80) { const z = new Uint8Array(v.length + 1); z[0] = 0x00; z.set(v, 1); v = z; }
+        const out = new Uint8Array(2 + v.length);
+        out[0] = 0x02; // INTEGER
+        out[1] = v.length;
+        out.set(v, 2);
+        return out;
+    }
+    function makeDerFromRS(r, s) {
+        const rDer = intToDer(r), sDer = intToDer(s);
+        const len = rDer.length + sDer.length;
+        const seq = new Uint8Array(2 + len);
+        seq[0] = 0x30; // SEQUENCE
+        seq[1] = len;  // short form (P-256 selalu < 128)
+        seq.set(rDer, 2);
+        seq.set(sDer, 2 + rDer.length);
+        return seq;
+    }
+
+    // Terima token string (base64/base64url) → bytes DER yang valid.
+    // Mencakup 3 kasus: DER asli, P1363 raw 64 byte, dan “content-only DER” (awal = 0x3C/0x44 dst).
+    function tokenStringToDerBytes(token) {
+        if (!token) throw new Error('token kosong');
+
+        // coba decode sebagai base64url dulu; kalau gagal, coba base64 biasa
+        let bytes;
+        try { bytes = b64uToB(token); } catch { bytes = b64ToB(token); }
+
+        // CASE A: sudah DER (diawali 0x30, 'M' => "ME...")
+        if (bytes.length >= 8 && bytes[0] === 0x30) {
+            return bytes;
+        }
+
+        // CASE B: P1363 raw (64 byte r||s)
+        if (bytes.length === 64) {
+            const r = bytes.slice(0, 32), s = bytes.slice(32);
+            return makeDerFromRS(r, s);
+        }
+
+        // CASE C: “content-only DER” (mis. [len][0x02][lenR]r...[0x02][lenS]s...)
+        // Rekonstruksi: prepend 0x30 dan panjang.
+        if (bytes.length > 4 && bytes[1] === 0x02) {
+            const len = bytes[0]; // asumsi short-form length
+            if (2 + len === bytes.length + 1 /* +1 untuk 0x30 */ || len <= bytes.length) {
+                const seq = new Uint8Array(2 + bytes.length);
+                seq[0] = 0x30;
+                seq[1] = bytes[0];            // length sesuai content
+                seq.set(bytes.slice(1), 2);    // loncati byte length lama
+                return seq;
+            }
+        }
+
+        // CASE D: gagal tebak → lempar agar verifikasi gagal
+        throw new Error('Format token tidak dikenal');
+    }
+
+    // ------------------ format adapter (id|date|token or JSON) ------------------
+    function normalizeToJson(text) {
+        const s = (text || '').trim();
+        if (!s) return s;
+        if (s.startsWith('{')) return s;
+        const parts = s.split('|');
+        if (parts.length >= 3) {
+            const [id, date, ...rest] = parts;
+            const token = rest.join('|');
+            return JSON.stringify({ id, date, token });
+        }
+        return s;
+    }
+
+    // ------------------ verify ------------------
+    function pemToBuf(pem) {
+        const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+        return b64ToB(b64).buffer;
+    }
+    async function importSpki(pemSpki) {
+        return crypto.subtle.importKey('spki', pemToBuf(pemSpki), { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    }
+
+    async function verifyIfConfigured(obj) {
+        const pem = (window.QR_CFG && window.QR_CFG.PUBLIC_KEY_PEM) || '';
+        if (!pem || !obj || !obj.token) return null;
+
+        try {
+            const pub = await importSpki(pem);
+            const msg = `${String(obj.id ?? '').trim()}|${String(obj.date ?? '').trim()}`;
+
+            // 1) coba direct DER / base64 / base64url
+            try {
+                const der = tokenStringToDerBytes(obj.token);
+                const ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, der, enc.encode(msg));
+                if (ok) return true;
+            } catch { /* lanjut */ }
+
+            // 2) fallback: kalau sudah dibantu jadi _token_der/_token_der2 (debug)
+            if (obj._token_der) {
+                const ok2 = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, b64ToB(obj._token_der), enc.encode(msg));
+                if (ok2) return true;
+            }
+            if (obj._token_der2) {
+                const ok3 = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pub, b64ToB(obj._token_der2), enc.encode(msg));
+                if (ok3) return true;
+            }
+
+            return false;
+        } catch (e) {
+            console.warn('Verifikasi gagal diproses:', e);
+            return false;
+        }
+    }
+
+    // ------------------ rules ------------------
+    function todayISO() {
+        const d = new Date(); const p = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    }
+    function validateRules(obj) {
+        const reasons = [];
+        if (!obj.id || !/^[A-Za-z0-9._-]{3,}$/.test(obj.id)) reasons.push('ID tidak valid/ kosong.');
+        if (!obj.date || !/^\d{4}-\d{2}-\d{2}$/.test(obj.date)) reasons.push('Format tanggal harus YYYY-MM-DD.');
+        else if (obj.date !== todayISO()) reasons.push('Tanggal bukan hari ini (token harian).');
+        return { ok: reasons.length === 0, reasons };
+    }
+
+    // ------------------ handle decoded ------------------
+    async function handleDecodedText(decodedText) {
+        try {
+            const normalized = normalizeToJson(decodedText);
+            if (!normalized || normalized[0] !== '{') {
+                setStatus('QR bukan JSON.', 'invalid');
+                parsedJson.textContent = decodedText || '';
+                return;
+            }
+
+            let obj;
+            try { obj = JSON.parse(normalized); }
+            catch { setStatus('QR JSON tidak valid.', 'invalid'); parsedJson.textContent = normalized; return; }
+
+            // aturan bisnis
+            const vrule = validateRules(obj);
+
+            // verifikasi kripto
+            const vcrypto = await verifyIfConfigured(obj); // true | false | null
+
+            // final status
+            let finalOK;
+            if (vcrypto === null) {
+                finalOK = false;
+                setStatus('QR terbaca — verifikasi dimatikan (PUBLIC_KEY kosong).', 'invalid');
+            } else {
+                finalOK = (vcrypto === true) && vrule.ok;
+                const label = finalOK ? 'QR valid.' : `QR terbaca — signature ${vcrypto ? 'VALID' : 'INVALID'}.`;
+                setStatus(label, finalOK ? 'valid' : 'invalid');
+            }
+
+            parsedJson.textContent = vrule.ok
+                ? JSON.stringify(obj, null, 2)
+                : JSON.stringify({ ...obj, _rules: vrule.reasons }, null, 2);
+        } catch (e) {
+            console.error(e);
+            setStatus('Terjadi kesalahan saat memproses QR.', 'invalid');
+        }
+    }
+
+    // ------------------ camera & upload ------------------
+    async function startCamera() {
+        try {
+            if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia tidak didukung');
+            stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+            video.srcObject = stream;
+            await video.play();
+            startBtn.disabled = true; stopBtn.disabled = false; scanning = true; scanLoop();
+        } catch (e) {
+            console.error(e);
+            alert('Gagal akses kamera: ' + (e.message || e));
+        }
+    }
+    function stopCamera() {
+        scanning = false;
+        if (rafId) cancelAnimationFrame(rafId);
+        if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+        startBtn.disabled = false; stopBtn.disabled = true;
+    }
+    async function scanLoop() {
+        if (!scanning) return;
+        try {
+            if (video.readyState >= 2) {
+                const w = video.videoWidth, h = video.videoHeight;
+                if (w && h) {
+                    canvas.width = w; canvas.height = h;
+                    ctx.drawImage(video, 0, 0, w, h);
+                    const img = ctx.getImageData(0, 0, w, h);
+                    const code = window.jsQR ? jsQR(img.data, w, h) : null;
+                    if (code && code.data) { await handleDecodedText(code.data); await sleep(800); }
+                }
+            }
+        } catch (e) { console.warn('scanLoop error:', e); }
+        finally { rafId = requestAnimationFrame(scanLoop); }
+    }
+
+    function chooseFile() { fileInput.click(); }
+    function readFileAsImage(file) {
+        return new Promise((resolve, reject) => {
+            const img = new Image(); img.onload = () => resolve(img); img.onerror = reject;
+            const fr = new FileReader(); fr.onload = () => { img.src = fr.result; }; fr.onerror = reject; fr.readAsDataURL(file);
+        });
+    }
+    async function handleFile(file) {
+        try {
+            const img = await readFileAsImage(file);
+            const w = img.naturalWidth, h = img.naturalHeight;
+            canvas.width = w; canvas.height = h; canvas.style.display = 'none';
+            ctx.drawImage(img, 0, 0, w, h);
+            const data = ctx.getImageData(0, 0, w, h);
+            const code = window.jsQR ? jsQR(data.data, w, h) : null;
+            if (code && code.data) { await handleDecodedText(code.data); }
+            else setStatus('QR tidak terdeteksi pada gambar.', 'invalid');
+        } catch (e) { console.error(e); setStatus('Gagal membaca gambar.', 'invalid'); }
+    }
+
+    startBtn.addEventListener('click', startCamera);
+    stopBtn.addEventListener('click', stopCamera);
+    uploadBtn.addEventListener('click', chooseFile);
+    fileInput.addEventListener('change', e => { const f = e.target.files?.[0]; if (f) handleFile(f); });
+    window.addEventListener('pagehide', stopCamera);
+})();
+
+
+
+
+
+
+
+// ================== CONFIG (ISI PUBLIC KEY DI SINI) ==================
+window.QR_CFG = window.QR_CFG || {};
+window.QR_CFG.PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEST+CuutOqfMDM3w3uB3ewzrmgHFj
+fzTShYZBlcbR1Z6qdpC8l3IiYVW+RmSsHaq8S7zdBSzDT5JTUuNgBtMTOA==
+-----END PUBLIC KEY-----`;
+// ====================================================================
+
+(function () {
+    // ------ Ambil elemen yang SUDAH ada di halaman ------
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('qrCanvas');
+    const ctx = canvas.getContext('2d');
+    const startBtn = document.getElementById('startCamBtn');
+    const stopBtn = document.getElementById('stopCamBtn');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const fileInput = document.getElementById('fileInput');
+    const resultText = document.getElementById('resultText');
+    const parsedJson = document.getElementById('parsedJson');
+
+    if (!window.jsQR) {
+        alert('Gagal akses kamera: jsQR tidak ditemukan.');
+    }
+
+    let stream = null, rafId = null, scanning = false;
+
+    // ------ Util kecil ------
+    const enc = new TextEncoder();
+    const setStatus = (t, cls) => {
+        resultText.textContent = t;
+        resultText.className = 'small' + (cls ? ' ' + cls : '');
+    };
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // ------ Base64 helpers ------
+    function b64urlToBytes(b64u) {
+        const b64 = (b64u || '').replace(/-/g, '+').replace(/_/g, '/');
+        const pad = b64.length % 4 ? '='.repeat(4 - (b64.length % 4)) : '';
+        const bin = atob(b64 + pad);
+        const out = new Uint8Array(bin.length);
+        for (let i = 0; i < out.length; i++) out[i] = bin.charCodeAt(i);
+        return out;
+    }
+    function b64ToBytes(b64) {
+        const bin = atob(b64);
+        const out = new Uint8Array(bin.length);
+        for (let i = 0; i < out.length; i++) out[i] = bin.charCodeAt(i);
+        return out;
+    }
+    function bytesToB64(bytes) {
+        let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+        return btoa(s);
+    }
+
+    // ------ PEM SPKI → ArrayBuffer ------
+    function pemToBuf(pem) {
+        const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+        return b64ToBytes(b64).buffer;
+    }
+
+    // ------ Import public key (ECDSA P-256 verify) ------
+    async function importSpki(pem) {
+        return crypto.subtle.importKey(
+            'spki',
+            pemToBuf(pem),
+            { name: 'ECDSA', namedCurve: 'P-256' },
+            false,
+            ['verify']
+        );
+    }
+
+    // ------ RAW (r||s 64-byte) → DER ------
+    function rawSigToDer(raw) {
+        if (!(raw instanceof Uint8Array) || raw.length !== 64) {
+            throw new Error('Signature RAW harus 64 byte');
+        }
+        const r = raw.slice(0, 32);
+        const s = raw.slice(32);
+
+        const trim = (x) => {
+            let i = 0;
+            while (i < x.length - 1 && x[i] === 0) i++;
+            return x.slice(i);
+        };
+        const intToDer = (x) => {
+            let v = trim(x);
+            // jika MSB 1 → prepend 0x00 agar positif
+            if (v[0] & 0x80) {
+                const z = new Uint8Array(v.length + 1);
+                z[0] = 0x00; z.set(v, 1);
+                v = z;
+            }
+            const out = new Uint8Array(2 + v.length);
+            out[0] = 0x02;      // INTEGER
+            out[1] = v.length;  // (panjang < 128 cukup 1 byte)
+            out.set(v, 2);
+            return out;
+        };
+
+        const rDer = intToDer(r);
+        const sDer = intToDer(s);
+        const len = rDer.length + sDer.length;
+
+        // SEQUENCE { rDer, sDer } (short-form length cukup karena max ~70)
+        const seq = new Uint8Array(2 + len);
+        seq[0] = 0x30;  // SEQUENCE
+        seq[1] = len;
+        seq.set(rDer, 2);
+        seq.set(sDer, 2 + rDer.length);
+        return seq;
+    }
+
+    // ------ Normalisasi input QR → JSON string ------
+    function normalizeToJson(text) {
+        const s = (text || '').trim();
+        if (!s) return s;
+        if (s.startsWith('{')) return s; // sudah JSON
+        // format ringkas: id|date|token
+        const parts = s.split('|');
+        if (parts.length >= 3) {
+            const [id, date, ...rest] = parts;
+            const token = rest.join('|');
+            return JSON.stringify({ id, date, token });
+        }
+        return s;
+    }
+
+    // ------ Siapkan kandidat signature dari token ------
+    function buildSigCandidates(token) {
+        const out = [];
+
+        // 1) Anggap token DER base64 / base64url
+        try { out.push(b64urlToBytes(token)); } catch { }
+        // 2) Kalau kebetulan base64 biasa (dengan + /)
+        try { out.push(b64ToBytes(token)); } catch { }
+
+        // 3) Kalau sebenarnya RAW 64 byte base64url → buat DER (r||s) dan fallback (s||r)
+        try {
+            const raw = b64urlToBytes(token);
+            if (raw.length === 64) {
+                // r||s
+                out.push(rawSigToDer(raw));
+                // s||r (fallback)
+                const swap = new Uint8Array(64);
+                swap.set(raw.slice(32), 0);
+                swap.set(raw.slice(0, 32), 32);
+                out.push(rawSigToDer(swap));
+            }
+        } catch { }
+
+        // Hapus duplikat (by length+first byte)
+        const uniq = [];
+        const seen = new Set();
+        for (const u8 of out) {
+            if (!(u8 instanceof Uint8Array)) continue;
+            const key = `${u8.length}:${u8[0]}`;
+            if (!seen.has(key)) { uniq.push(u8); seen.add(key); }
+        }
+        return uniq;
+    }
+
+    // ------ Verifikasi ECDSA (return true/false) ------
+    async function verifySignature(obj) {
+        const pem = (window.QR_CFG && window.QR_CFG.PUBLIC_KEY_PEM) || '';
+        if (!pem || !obj || !obj.token) return null; // verifikasi dimatikan
+
+        const pub = await importSpki(pem);
+
+        // Pesan HARUS persis id|date (case-sensitive, tanpa spasi tambahan)
+        const canon = (x) => String(x ?? '').trim();
+        const msg = `${canon(obj.id)}|${canon(obj.date)}`;
+        const msgBytes = enc.encode(msg);
+
+        const candidates = buildSigCandidates(obj.token);
+
+        for (const sig of candidates) {
+            try {
+                const ok = await crypto.subtle.verify(
+                    { name: 'ECDSA', hash: 'SHA-256' },
+                    pub,
+                    sig,
+                    msgBytes
+                );
+                if (ok) {
+                    // simpan kandidat yang cocok untuk pemantauan/debug
+                    obj._verified_with = `DER(len=${sig.length})`;
+                    return true;
+                }
+            } catch { }
+        }
+        return false;
+    }
+
+    // ------ Aturan bisnis (id & tanggal) ------
+    function todayISO() {
+        const d = new Date(); const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    }
+    function validateRules(obj) {
+        const reasons = [];
+
+        // id & tanggal dasar
+        if (!obj.id || !/^[A-Za-z0-9._-]{3,}$/.test(obj.id)) reasons.push('ID tidak valid / kosong.');
+        if (!obj.date || !/^\d{4}-\d{2}-\d{2}$/.test(obj.date)) {
+            reasons.push('Format tanggal harus YYYY-MM-DD.');
+        } else if (obj.date !== todayISO()) {
+            reasons.push('Tanggal bukan hari ini (token harian).');
+        }
+
+        // 🔒 tambahan: id QR harus sama dengan akun login (jika diaktifkan)
+        if (window.QR_CFG?.ENFORCE_ID_MATCH && SESSION && SESSION.role !== 'admin') {
+            if (obj.id !== SESSION.id) {
+                reasons.push('ID pada QR tidak cocok dengan akun yang login.');
+            }
+        }
+        return { ok: reasons.length === 0, reasons };
+    }
+
+    // ------ Proses hasil QR ------
+    async function handleDecodedText(decodedText) {
+        try {
+            const normalized = normalizeToJson(decodedText);
+            if (!normalized || normalized[0] !== '{') {
+                setStatus('QR bukan JSON.', 'invalid');
+                parsedJson.textContent = decodedText || '';
+                return;
+            }
+
+            let obj;
+            try { obj = JSON.parse(normalized); }
+            catch { setStatus('QR JSON tidak valid.', 'invalid'); parsedJson.textContent = normalized; return; }
+
+            // Validasi bisnis terlebih dahulu
+            const rules = validateRules(obj);
+
+            // Verifikasi kriptografi (jika PUBLIC_KEY disetel)
+            const vcrypto = await verifySignature(obj); // true | false | null
+
+            // Keputusan akhir: WAJIB vcrypto === true & rules.ok
+            let finalOK;
+            if (vcrypto === null) {
+                finalOK = false;
+                setStatus('QR terbaca — verifikasi dimatikan (PUBLIC_KEY kosong).', 'invalid');
+            } else {
+                finalOK = (vcrypto === true) && rules.ok;
+                const label = finalOK
+                    ? 'QR valid.'
+                    : `QR terbaca — signature ${vcrypto ? 'VALID' : 'INVALID'}.`;
+                setStatus(label, finalOK ? 'valid' : 'invalid');
+            }
+
+            // Tampilkan JSON + alasan aturan bila ada
+            if (!rules.ok) {
+                parsedJson.textContent = JSON.stringify({ ...obj, _rules: rules.reasons }, null, 2);
+            } else {
+                parsedJson.textContent = JSON.stringify(obj, null, 2);
+            }
+
+            // Debug ringkas
+            console.debug('[QR] msg =', `${obj.id}|${obj.date}`, ' verified_with =', obj._verified_with || '-');
+        } catch (e) {
+            console.error(e);
+            setStatus('Terjadi kesalahan saat memproses QR.', 'invalid');
+        }
+    }
+
+    // ------ Kamera ------
+    async function startCamera() {
+        try {
+            if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia tidak didukung');
+            stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+            video.srcObject = stream;
+            await video.play();
+            startBtn.disabled = true; stopBtn.disabled = false; scanning = true; scanLoop();
+        } catch (e) {
+            console.error(e);
+            alert('Gagal akses kamera: ' + (e.message || e));
+        }
+    }
+    function stopCamera() {
+        scanning = false;
+        if (rafId) cancelAnimationFrame(rafId);
+        if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+        startBtn.disabled = false; stopBtn.disabled = true;
+    }
+    async function scanLoop() {
+        if (!scanning) return;
+        try {
+            if (video.readyState >= 2) {
+                const w = video.videoWidth, h = video.videoHeight;
+                if (w && h) {
+                    canvas.width = w; canvas.height = h; ctx.drawImage(video, 0, 0, w, h);
+                    const img = ctx.getImageData(0, 0, w, h);
+                    const code = window.jsQR ? jsQR(img.data, w, h) : null;
+                    if (code && code.data) { await handleDecodedText(code.data); await sleep(800); }
+                }
+            }
+        } catch (e) { console.warn('scanLoop error:', e); }
+        finally { rafId = requestAnimationFrame(scanLoop); }
+    }
+
+    // ------ Upload gambar ------
+    function chooseFile() { fileInput.click(); }
+    function readFileAsImage(file) {
+        return new Promise((resolve, reject) => {
+            const img = new Image(); img.onload = () => resolve(img); img.onerror = reject;
+            const fr = new FileReader(); fr.onload = () => { img.src = fr.result; }; fr.onerror = reject; fr.readAsDataURL(file);
+        });
+    }
+    async function handleFile(file) {
+        try {
+            const img = await readFileAsImage(file);
+            const w = img.naturalWidth, h = img.naturalHeight;
+            canvas.width = w; canvas.height = h; canvas.style.display = 'none';
+            ctx.drawImage(img, 0, 0, w, h);
+            const data = ctx.getImageData(0, 0, w, h);
+            const code = window.jsQR ? jsQR(data.data, w, h) : null;
+            if (code && code.data) { await handleDecodedText(code.data); }
+            else setStatus('QR tidak terdeteksi pada gambar.', 'invalid');
+        } catch (e) { console.error(e); setStatus('Gagal membaca gambar.', 'invalid'); }
+    }
+
+    // ------ Event listeners ------
+    startBtn.addEventListener('click', startCamera);
+    stopBtn.addEventListener('click', stopCamera);
+    uploadBtn.addEventListener('click', chooseFile);
+    fileInput.addEventListener('change', e => {
+        const f = e.target.files && e.target.files[0];
+        if (f) handleFile(f);
+    });
+    window.addEventListener('pagehide', stopCamera);
+})();
+

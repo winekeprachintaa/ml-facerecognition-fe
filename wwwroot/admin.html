@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="id">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Admin — Generate QR Izin</title>
+    <link rel="manifest" href="./manifest.json" />
+    <style>
+        body {
+            font-family: system-ui,Arial;
+            padding: 18px;
+            max-width: 900px;
+            margin: auto;
+        }
+
+        .card {
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 14px;
+        }
+
+        label {
+            display: block;
+            margin-top: 8px;
+            font-weight: 600;
+            font-size: 20px;
+        }
+
+        input, textarea, button {
+            width: 97%;
+            padding: 10px;
+            margin-top: 6px;
+            border-radius: 8px;
+            border: 1px solid #e5e7eb;
+            font-size: 16px;
+        }
+
+        button {
+            cursor: pointer;
+            background: #111827;
+            color: #fff;
+            border-color: #111827;
+            font-size: 16px;
+        }
+
+        .row {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap
+        }
+
+        #qrcode {
+            width: 200px;
+            height: 200px;
+            border: 1px dashed #e5e7eb;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 8px
+        }
+
+        .small {
+            color: #666;
+            font-size: 16px
+        }
+    </style>
+</head>
+<body>
+    <h1>Admin — Generate QR</h1>
+    <p class="small">Token harian = ECDSA P-256 (SHA-256) atas string: <code>id|date</code>. Private key ditempel saat generate (tidak disimpan).</p>
+
+    <div class="card">
+        <label>Private Key (PEM PKCS#8)</label>
+        <textarea id="priPem" rows="8" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"></textarea>
+
+        <div class="row">
+            <div style="flex:1">
+                <label>ID Pekerja</label>
+                <input id="workerId" type="text" placeholder="PEKERJA-001" />
+            </div>
+            <div style="flex:1">
+                <label>Tanggal</label>
+                <input id="dateInput" type="date" />
+            </div>
+        </div>
+
+        <label>QR JSON</label>
+        <textarea id="qrJson" rows="6" readonly></textarea>
+
+        <div class="row" style="margin-top:8px;">
+            <button id="genBtn">Generate + Sign → QR</button>
+            <button id="copyBtn">Copy JSON</button>
+            <button id="dlBtn">Download PNG</button>
+            <button id="scanBtn">Buka Scanner</button>
+        </div>
+
+        <details style="margin-top: 10px; font-size: 16px;">
+            <summary>Tambah User (lokal)</summary>
+            <label>ID Pekerja</label>
+            <input id="nuId" type="text" />
+            <label>Password</label>
+            <input id="nuPass" type="password" />
+            <label>Peran</label>
+            <select style="font-size: 20px;" id="nuRole">
+                <option value="scanner">scanner</option>
+                <option value="admin">admin</option>
+            </select>
+            <button id="addUserBtn" style="margin-top:8px;">Tambah User</button>
+            <p id="userMsg" class="small"></p>
+        </details>
+
+        <div id="qrcode" style="margin-top:10px;"></div>
+    </div>
+
+    <p class="small" id="status"></p>
+
+    <script src="./js/auth.js"></script>
+
+    <!-- QRCode lib -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <!-- util crypto kamu -->
+    <script src="./js/crypto-utils.js"></script>
+
+    <script>
+        // Ambil elemen yang sudah ada di halaman (ID-nya tetap)
+        const workerId = document.getElementById('workerId');
+        const dateInput = document.getElementById('dateInput');
+        const priPem = document.getElementById('priPem');
+        const qrJson = document.getElementById('qrJson');
+        const genBtn = document.getElementById('genBtn');
+        const copyBtn = document.getElementById('copyBtn');
+        const dlBtn = document.getElementById('dlBtn');
+        const qrcodeDiv = document.getElementById('qrcode');
+        const scanBtn = document.getElementById('scanBtn');
+        const addUserBtn = document.getElementById('addUserBtn');
+        const userMsg = document.getElementById('userMsg');
+
+
+        // set default tanggal = hari ini
+        dateInput.value = new Date().toISOString().slice(0, 10);
+
+        // ---------- helpers umum ----------
+        function toBase64Url(b64) {
+            return (b64 || '').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+        }
+        function b64ToBytes(b64u) {
+            const b64 = (b64u || '').replace(/-/g, '+').replace(/_/g, '/');
+            const pad = b64.length % 4 ? '='.repeat(4 - (b64.length % 4)) : '';
+            const bin = atob(b64 + pad);
+            const out = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+            return out;
+        }
+        function bytesToB64url(bytes) {
+            let bin = ''; for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+            return toBase64Url(btoa(bin));
+        }
+
+        // ---------- parser DER yang tahan long-form length ----------
+        function readLen(view, state) {
+            let lenByte = view[state.idx++];
+            if ((lenByte & 0x80) === 0) return lenByte;      // short form
+            const n = lenByte & 0x7f;                        // banyaknya byte length
+            let len = 0;
+            for (let i = 0; i < n; i++) len = (len << 8) | view[state.idx++];
+            return len;
+        }
+        // Ubah signature DER ASN.1 → raw r||s 64-byte (P-256), lalu kita base64url
+        function derToRawRS(derBytes) {
+            const v = derBytes instanceof Uint8Array ? derBytes : new Uint8Array(derBytes);
+            const s = { idx: 0 };
+            if (v[s.idx++] !== 0x30) throw new Error('DER: SEQUENCE expected');
+            readLen(v, s); // total length (abaikan)
+
+            if (v[s.idx++] !== 0x02) throw new Error('DER: INTEGER r expected');
+            let rLen = readLen(v, s);
+            let r = v.slice(s.idx, s.idx + rLen); s.idx += rLen;
+
+            if (v[s.idx++] !== 0x02) throw new Error('DER: INTEGER s expected');
+            let sLen = readLen(v, s);
+            let t = v.slice(s.idx, s.idx + sLen); s.idx += sLen;
+
+            // buang leading 0x00 jika ada, lalu left-pad ke 32 byte
+            if (r[0] === 0x00) r = r.slice(1);
+            if (t[0] === 0x00) t = t.slice(1);
+
+            const rPad = new Uint8Array(32); rPad.set(r, 32 - r.length);
+            const sPad = new Uint8Array(32); sPad.set(t, 32 - t.length);
+
+            const out = new Uint8Array(64);
+            out.set(rPad, 0); out.set(sPad, 32);
+            return out;
+        }
+
+        async function generateCompactQR() {
+            // Validasi input
+            if (!priPem.value.trim() || !workerId.value.trim() || !dateInput.value) {
+                alert('Lengkapi data.'); return;
+            }
+
+            // Import private key & sign pesan "id|date"
+            const pri = await CryptoUtils.importPrivateKeyPem(priPem.value.trim());
+            const message = `${workerId.value.trim()}|${dateInput.value}`;
+            let sig = await CryptoUtils.signP256(pri, CryptoUtils.textEnc(message)); // bisa string base64 / bytes
+
+            // Normalisasi → jadikan token sependek mungkin (raw r||s → base64url),
+            // tapi kalau gagal parsing, fallback ke bentuk asli agar tetap jalan.
+            let tokenB64url;
+            try {
+                let derBytes;
+                if (sig instanceof Uint8Array) derBytes = sig;
+                else if (sig instanceof ArrayBuffer) derBytes = new Uint8Array(sig);
+                else if (typeof sig === 'string') derBytes = b64ToBytes(sig);
+                else throw new Error('Format signature tak dikenal');
+
+                const rawRS = derToRawRS(derBytes);
+                tokenB64url = bytesToB64url(rawRS);                 // ringkas (≈88 char)
+            } catch (e) {
+                // fallback aman: pakai apa adanya, diubah ke base64url
+                if (typeof sig === 'string') tokenB64url = toBase64Url(sig);
+                else if (sig instanceof Uint8Array) tokenB64url = bytesToB64url(sig);
+                else if (sig instanceof ArrayBuffer) tokenB64url = bytesToB64url(new Uint8Array(sig));
+                else throw e;
+            }
+
+            // Tampilkan JSON di textarea (untuk audit/copy) — UI lama tetap
+            const payload = { id: workerId.value.trim(), date: dateInput.value, token: tokenB64url };
+            qrJson.value = JSON.stringify(payload);
+
+            // QR RINGKAS: "id|date|token" (tanpa JSON) + koreksi error level rendah agar tidak terlalu padat
+            const compact = `${payload.id}|${payload.date}|${payload.token}`;
+            qrcodeDiv.innerHTML = '';
+            new QRCode(qrcodeDiv, {
+                text: compact,
+                width: 180,
+                height: 180,
+                correctLevel: QRCode.CorrectLevel.L
+            });
+        }
+
+        // Event handlers
+        genBtn.onclick = () => {
+            generateCompactQR().catch(err => {
+                console.error(err);
+                alert('Gagal generate: ' + (err.message || err));
+            });
+        };
+
+        copyBtn.onclick = () => {
+            if (!qrJson.value) return;
+            navigator.clipboard.writeText(qrJson.value);
+            alert('JSON disalin.');
+        };
+
+        dlBtn.onclick = () => {
+            const img = qrcodeDiv.querySelector('img') || qrcodeDiv.querySelector('canvas');
+            if (!img) { alert('Generate dulu.'); return; }
+            let dataUrl;
+            if (img.tagName.toLowerCase() === 'img') {
+                const c = document.createElement('canvas');
+                c.width = img.naturalWidth; c.height = img.naturalHeight;
+                c.getContext('2d').drawImage(img, 0, 0);
+                dataUrl = c.toDataURL('image/png');
+            } else {
+                dataUrl = img.toDataURL('image/png');
+            }
+            const a = document.createElement('a');
+            a.href = dataUrl;
+            const safeId = (workerId.value.trim() || 'izin-kerja').replace(/[^A-Za-z0-9._-]+/g, '_');
+            a.download = `${safeId}.png`;
+            a.click();
+        };
+
+        scanBtn.onclick = () => {
+            // buka di tab baru. Jika mau di tab yang sama, ganti '_blank' → '_self'
+            window.open('./scanner.html', '_blank');
+            // jika masih kena cache SW saat pengembangan:
+            // window.open('./scanner.html?v=' + Date.now(), '_blank');
+        };
+
+        addUserBtn.onclick = async () => {
+            try {
+                await Auth.addLocalUser(nuId.value.trim(), nuPass.value, nuRole.value);
+                userMsg.textContent = 'User lokal ditambahkan (tersimpan di perangkat ini).';
+            } catch (e) { userMsg.textContent = 'Gagal: ' + e.message; }
+        };
+
+    </script>
+</body>
+</html>

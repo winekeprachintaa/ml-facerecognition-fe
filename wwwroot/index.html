@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="id">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Login — QR Izin Kerja</title>
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-size='44'%3E🔑%3C/text%3E%3C/svg%3E">
+    <style>
+        body {
+            font-family: system-ui,Arial;
+            padding: 24px;
+            max-width: 420px;
+            margin: auto;
+        }
+
+        .card {
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 16px;
+        }
+
+        label {
+            display: block;
+            margin-top: 8px;
+            font-weight: 600
+        }
+
+        input, button, select {
+            width: 100%;
+            padding: 10px;
+            margin-top: 6px;
+            border-radius: 8px;
+            border: 1px solid #e5e7eb
+        }
+
+        button {
+            cursor: pointer;
+            background: #111827;
+            color: #fff;
+            border-color: #111827
+        }
+
+        .small {
+            color: #666;
+            font-size: .9rem
+        }
+    </style>
+</head>
+<body>
+    <h1>Login</h1>
+    <p class="small">Masuk dengan <b>ID Pekerja</b> dan <b>Password</b>. Data login disimpan lokal (PBKDF2) — tanpa database.</p>
+
+    <div class="card">
+        <label>ID Pekerja</label>
+        <input id="userId" type="text" placeholder="mis. PEKERJA-001" />
+        <label>Password</label>
+        <input id="userPass" type="password" placeholder="••••••" />
+        <button id="loginBtn">Masuk</button>
+    </div>
+
+    <p class="small" id="status"></p>
+
+    <script src="./js/auth.js"></script>
+    <script>
+        if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js');
+
+        const userId = document.getElementById('userId');
+        const userPass = document.getElementById('userPass');
+        const loginBtn = document.getElementById('loginBtn');
+        const statusEl = document.getElementById('status');
+
+        loginBtn.onclick = async () => {
+            const ok = await Auth.login(userId.value.trim(), userPass.value);
+            if (!ok) { statusEl.textContent = 'Login gagal.'; return; }
+            const s = Auth.getSession();
+            statusEl.textContent = `Masuk sebagai ${s.id} (${s.role})`;
+            location.href = s.role === 'admin' ? './admin.html' : './scanner.html';
+        };
+
+        const nuId = document.getElementById('nuId');
+        const nuPass = document.getElementById('nuPass');
+        const nuRole = document.getElementById('nuRole');
+    </script>
+</body>
+</html>

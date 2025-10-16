@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
+	<ItemGroup>
+		<None Include="wwwroot\**\*" CopyToOutputDirectory="Always" />
+	</ItemGroup>
+	<ItemGroup>
+	  <Content Remove="wwwroot\js\admin.js" />
+	  <Content Remove="wwwroot\js\jsQr.js" />
+	  <Content Remove="wwwroot\styles.css" />
+	</ItemGroup>
+	<ItemGroup>
+	  <None Remove="wwwroot\models\best.onnx" />
+	</ItemGroup>
+</Project>

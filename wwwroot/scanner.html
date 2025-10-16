@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="id">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Scanner — QR Izin Kerja</title>
+    <link rel="manifest" href="./manifest.json" />
+
+    <!-- jsQR dulu -->
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js" defer></script>
+
+    <!-- lib kamu (jika dipakai) -->
+    <script src="./js/crypto-utils.js?v=1" defer></script>
+
+    <!-- auth (untuk who/guard) -->
+    <script src="./js/auth.js?v=1" defer></script>
+    
+    <!-- onnxruntime-web -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+
+    <!-- scanner logic (punya kamu) -->
+    <script src="./js/scanner.js?v=6" defer></script>
+
+    <!-- pastikan canvas tidak memblokir klik -->
+    <style>
+        /* === Layout kamera + overlay === */
+        .cam-wrap {
+            position: relative;
+            width: 100%;
+            max-width: 900px;
+            margin: 0;
+        }
+        /* Basis pratinjau: kita tampilkan qrCanvas (frame dari video) */
+        #qrCanvas {
+            display: block;
+            width: 100%;
+            height: auto;
+            pointer-events: none; /* biar klik tombol tidak ketahan */
+            border-radius: 10px;
+            background: #000;
+        }
+        /* Overlay bbox di atas qrCanvas */
+        #faceCanvas {
+            position: absolute;
+            inset: 0; /* top:0; right:0; bottom:0; left:0 */
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 2;
+            display: block;
+        }
+        /* Video dipakai sebagai sumber, tapi tidak perlu terlihat */
+        #video {
+            display: none;
+            width: 100%;
+            height: auto;
+            background: #000;
+        }
+
+        /* === CSS asli (tidak diubah) === */
+        body {
+            font-family: system-ui,Arial;
+            padding: 18px;
+            max-width: 900px;
+            margin: auto;
+        }
+
+        .small {
+            color: #666;
+            font-size: .9rem
+        }
+
+        .card {
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 14px;
+        }
+
+        .valid {
+            color: #1f9d55;
+            font-weight: 700
+        }
+
+        .invalid {
+            color: #c0392b;
+            font-weight: 700
+        }
+
+        button {
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid #111827;
+            background: #111827;
+            color: #fff;
+            cursor: pointer
+        }
+
+        .outline {
+            background: #fff;
+            color: #111827
+        }
+
+        /* ===== Modal Hasil Scan (Valid/Invalid) ===== */
+        .scan-pop {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0,0,0,.45);
+            z-index: 9999;
+            opacity: 0;
+            pointer-events: none;
+            transition: .15s ease
+        }
+
+            .scan-pop.show {
+                opacity: 1;
+                pointer-events: auto
+            }
+
+        #scan-pop-card {
+            width: min(92vw,360px);
+            border-radius: 22px;
+            padding: 22px 20px;
+            background: #fff;
+            box-shadow: 0 20px 40px rgba(0,0,0,.25);
+            border: 2px solid var(--accent,#e5e7eb);
+            transform: translateY(10px) scale(.98);
+            transition: .15s ease
+        }
+
+        .scan-pop.show #scan-pop-card {
+            transform: translateY(0) scale(1)
+        }
+
+        .scan-pop.valid {
+            --accent: #16a34a;
+            --accent-bg: #dcfce7;
+            --accent-ink: #14532d
+        }
+
+        .scan-pop.invalid {
+            --accent: #dc2626;
+            --accent-bg: #fee2e2;
+            --accent-ink: #7f1d1d
+        }
+
+        .scan-pop.valid #scan-pop-card {
+            background: var(--accent-bg)
+        }
+
+        .scan-pop.invalid#scan-pop-card {
+            background: var(--accent-bg)
+        }
+
+        #scan-pop-icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 10px
+        }
+
+        #scan-pop-title {
+            font-weight: 800;
+            font-size: 22px;
+            color: var(--accent-ink,#111827);
+            text-align: center;
+            margin: 6px 0
+        }
+
+        #scan-pop-text {
+            font-size: 14px;
+            color: #111827;
+            opacity: .85;
+            text-align: center;
+            margin: 0 6px 14px;
+            word-break: break-word
+        }
+
+        #scan-pop-ok {
+            border: 0;
+            padding: 10px 18px;
+            border-radius: 10px;
+            font-weight: 600;
+            color: #fff;
+            background: var(--accent,#16a34a);
+            cursor: pointer
+        }
+
+            #scan-pop-ok:active {
+                transform: translateY(1px)
+            }
+
+        .svg-circle {
+            stroke: var(--accent,#16a34a);
+            stroke-width: 3;
+            fill: none
+        }
+
+        .svg-tick {
+            stroke: var(--accent,#16a34a);
+            stroke-width: 3;
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round
+        }
+
+        .svg-cross {
+            stroke: var(--accent,#dc2626);
+            stroke-width: 3;
+            fill: none;
+            stroke-linecap: round
+        }
+    </style>
+</head>
+<body>
+    <h1>Scanner</h1>
+    <p class="small" id="who"></p>
+
+    <div class="card">
+        <!-- Sumber kamera (disembunyikan) -->
+        <video id="video" autoplay muted playsinline></video>
+
+        <!-- Area pratinjau + overlay -->
+        <div id="camWrap" class="cam-wrap">
+            <canvas id="qrCanvas"></canvas>     <!-- frame dari video -->
+            <canvas id="faceCanvas"></canvas>   <!-- overlay untuk bbox -->
+        </div>
+
+        <div style="display:flex;gap:8px;margin-top:8px;">
+            <button id="startCamBtn">Start Camera</button>
+            <button id="stopCamBtn" class="outline" disabled>Stop Camera</button>
+            <button id="uploadBtn" class="outline">Upload Gambar QR</button>
+            <input id="fileInput" type="file" accept="image/*" style="display:none" />
+        </div>
+    </div>
+
+    <!-- POPUP RESULT -->
+    <div id="scan-pop" class="scan-pop hidden">
+        <div id="scan-pop-card">
+            <div id="scan-pop-icon">
+                <!-- dua ikon: tampilkan salah satu via JS -->
+                <svg id="icon-ok" width="72" height="72" viewBox="0 0 72 72" style="display:none">
+                    <circle class="svg-circle" cx="36" cy="36" r="28"></circle>
+                    <path class="svg-tick" d="M24 37 L33 46 L49 28"></path>
+                </svg>
+                <svg id="icon-fail" width="72" height="72" viewBox="0 0 72 72" style="display:none">
+                    <circle class="svg-circle" cx="36" cy="36" r="28"></circle>
+                    <path class="svg-cross" d="M27 27 L45 45 M45 27 L27 45"></path>
+                </svg>
+            </div>
+
+            <div id="scan-pop-title">VALID</div>
+            <div id="scan-pop-text">Izin Kerja DIberikan.</div>
+            <div style="display:flex; justify-content:center;">
+                <button id="scan-pop-ok" type="button">Ok</button>
+            </div>
+        </div>
+    </div>
+
+
+    <h2>Hasil</h2>
+    <p id="resultText" class="small">Belum ada hasil.</p>
+    <pre id="parsedJson" class="small"></pre>
+
+    <!-- Inline script: tunggu DOM & semua <script defer> (auth.js) siap -->
+    <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('./service-worker.js').catch(() => { });
+            }
+            const s = window.Auth?.getSession?.();
+            if (!s) { location.href = './'; return; }
+            document.getElementById('who').textContent = `Masuk sebagai ${s.id} (${s.role})`;
+        });
+    </script>
+</body>
+</html>

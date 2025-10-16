@@ -1,0 +1,143 @@
+// Verifikasi QR: mendukung mode single {id,date,token} dan batch {type:'batch', date?, entries:[[id,token,(date?)],...]}
+// WAJIB: ganti SCANNER_PUBLIC_KEY_PEM dengan public key SPKI PEM pasangan dari private key admin
+(function () {
+    const SCANNER_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEY+n0S1M8DnhP5KDsXsZTLM6fOClY
+XLFjJ7+JsSwKUcHl1BhkAFekzSG5vZgxAjQZO5veVvw5mElGsjjzxLox7Q==
+-----END PUBLIC KEY-----`;
+
+    const REQUIRE_ID_MATCH = true; // hanya izinkan scanner memvalidasi QR miliknya
+
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('qrCanvas');
+    const startBtn = document.getElementById('startCamBtn');
+    const stopBtn = document.getElementById('stopCamBtn');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const fileInput = document.getElementById('fileInput');
+    const resultText = document.getElementById('resultText');
+    const parsedJson = document.getElementById('parsedJson');
+    const session = (window.Auth && typeof Auth.getSession === 'function') ? Auth.getSession() : null;
+
+    let stream = null, scanning = false, loopHandle = null, publicKey = null;
+
+    // Handler dipasang lebih dulu supaya tombol tetap hidup walau public key invalid
+    startBtn.onclick = async () => {
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+            video.srcObject = stream; await video.play();
+            scanning = true; startBtn.disabled = true; stopBtn.disabled = false;
+            loop();
+        } catch (e) { alert('Gagal akses kamera: ' + (e?.message || e)); }
+    };
+    stopBtn.onclick = () => {
+        if (!scanning) return;
+        if (stream) stream.getTracks().forEach(t => t.stop());
+        scanning = false; startBtn.disabled = false; stopBtn.disabled = true;
+        if (loopHandle) clearTimeout(loopHandle);
+    };
+    uploadBtn.onclick = () => fileInput.click();
+    fileInput.onchange = (ev) => {
+        const f = ev.target.files[0]; if (!f) return;
+        const img = new Image(); const url = URL.createObjectURL(f);
+        img.onload = () => {
+            canvas.width = img.width; canvas.height = img.height;
+            const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0);
+            const im = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const code = jsQR(im.data, im.width, im.height, { inversionAttempts: 'dontInvert' });
+            if (code) handleScanned(code.data); else alert('QR tidak terdeteksi.');
+            URL.revokeObjectURL(url);
+        };
+        img.src = url;
+    };
+
+    (async () => {
+        try { publicKey = await CryptoUtils.importPublicKeyPem(SCANNER_PUBLIC_KEY_PEM); }
+        catch (e) { publicKey = null; resultText.innerHTML = '<span class="invalid">Public key tidak valid (SPKI PEM).</span>'; console.error(e); }
+    })();
+
+    function isTodayISO(iso) {
+        const today = new Date().toISOString().slice(0, 10);
+        return iso === today;
+    }
+
+    async function verifyIdDateToken(id, date, token) {
+        if (!publicKey) { resultText.innerHTML = '<span class="invalid">Public key belum valid.</span>'; return false; }
+        const ok = await CryptoUtils.verifyP256(publicKey, CryptoUtils.textEnc(`${id}|${date}`), token);
+        return ok;
+    }
+
+    async function handleScanned(text) {
+        // Multi-part batch?
+        if (text.startsWith('__PART__')) {
+            const m = text.match(/^__PART__(\d+)\/(\d+)__([\s\S]*)$/);
+            if (!m) { resultText.innerHTML = '<span class="invalid">Format part QR tidak dikenali.</span>'; return; }
+            const part = parseInt(m[1], 10), total = parseInt(m[2], 10), chunk = m[3];
+            const KEY = 'batch_parts';
+            const st = JSON.parse(sessionStorage.getItem(KEY) || '{"total":0,"chunks":{}}');
+            if (!st.total || st.total !== total) { st.total = total; st.chunks = {}; }
+            st.chunks[part] = chunk;
+            sessionStorage.setItem(KEY, JSON.stringify(st));
+            if (Object.keys(st.chunks).length < total) {
+                resultText.innerHTML = `<span class="valid">Bagian ${part}/${total} diterima. Scan berikutnya…</span>`;
+                return;
+            }
+            const ordered = Array.from({ length: total }, (_, i) => st.chunks[i + 1]).join('');
+            text = ordered;
+            sessionStorage.removeItem(KEY);
+        }
+
+        let data;
+        try { data = JSON.parse(text); }
+        catch { resultText.innerHTML = '<span class="invalid">QR bukan JSON.</span>'; parsedJson.textContent = text; return; }
+
+        // BATCH MODE
+        if (data && data.type === 'batch' && Array.isArray(data.entries)) {
+            const dateHeader = data.date || null;
+            const map = {};
+            for (const row of data.entries) {
+                if (row.length === 2) { const [id, token] = row; map[String(id).trim()] = { token, date: dateHeader }; }
+                else if (row.length >= 3) { const [id, token, d] = row; map[String(id).trim()] = { token, date: d }; }
+            }
+            sessionStorage.setItem('BATCH_TOKEN_MAP', JSON.stringify(map));
+            resultText.innerHTML = '<span class="valid">Master QR dimuat. Siap validasi.</span>';
+
+            if (!(session && session.id)) return;
+            const rec = map[session.id];
+            if (!rec) { resultText.innerHTML = `<span class="invalid">ID ${session.id} tidak ada pada paket.</span>`; return; }
+            const d = rec.date || new Date().toISOString().slice(0, 10);
+            if (!isTodayISO(d)) { resultText.innerHTML = `<span class="invalid">Tanggal ${d} tidak sesuai (harus hari ini).</span>`; return; }
+            const ok = await verifyIdDateToken(session.id, d, rec.token);
+            parsedJson.textContent = JSON.stringify({ id: session.id, date: d, token: rec.token }, null, 2);
+            resultText.innerHTML = ok ? '<span class="valid">✅ Izin VALID — token cocok.</span>' : '<span class="invalid">❌ Izin TIDAK VALID — token salah.</span>';
+            return;
+        }
+
+        // SINGLE MODE
+        parsedJson.textContent = JSON.stringify(data, null, 2);
+        data.id = String(data.id || '').trim();
+        if (!data.id || !data.date || !data.token) {
+            resultText.innerHTML = '<span class="invalid">Format QR tidak sesuai.</span>'; return;
+        }
+        const loggedInId = String(session?.id || '').trim();
+        if (REQUIRE_ID_MATCH && session?.role === 'scanner' && loggedInId && data.id !== loggedInId) {
+            resultText.innerHTML = `<span class="invalid">ID pada QR (${data.id}) tidak sesuai dengan pengguna login (${loggedInId}).</span>`;
+            return;
+        }
+        if (!isTodayISO(data.date)) { resultText.innerHTML = '<span class="invalid">Tanggal tidak sesuai (harus hari ini).</span>'; return; }
+        const ok = await verifyIdDateToken(data.id, data.date, data.token);
+        resultText.innerHTML = ok ? '<span class="valid">✅ Izin VALID — token cocok.</span>' : '<span class="invalid">❌ Izin TIDAK VALID — token salah.</span>';
+    }
+
+    function loop() {
+        if (!scanning) return;
+        if (video.readyState === video.HAVE_ENOUGH_DATA) {
+            canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const code = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+            if (code) { handleScanned(code.data); stopBtn.click(); return; }
+        }
+        loopHandle = setTimeout(loop, 280);
+    }
+})();

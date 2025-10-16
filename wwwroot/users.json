@@ -1,0 +1,19 @@
+[
+  {
+    "id": "admin",
+    "role": "admin",
+    "salt": "EI_8miDdFdCz53SJTgjJdw",
+    "hash": "YtDQLYgIA0UscHI6m5JcVNfO4gAIZCVHfg2VwT6DbAU",
+    "iterations": 150000,
+    "alg": "PBKDF2-SHA256"
+  },
+
+  {
+    "id": "Security",
+    "role": "scanner",
+    "salt": "ixEb_O-tAS6N3sv4mud4zA",
+    "hash": "Pso3k2laPD7HzuMP5eHehlNv5tR1GuKCOrRxKJV8n-w",
+    "iterations": 150000,
+    "alg": "PBKDF2-SHA256"
+  }
+]
