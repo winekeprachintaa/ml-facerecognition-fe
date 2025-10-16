@@ -93,6 +93,7 @@
             <button id="copyBtn">Copy JSON</button>
             <button id="dlBtn">Download PNG</button>
             <button id="scanBtn">Buka Scanner</button>
+            <button id="faceBtn">Face API Demo</button>
         </div>
 
         <details style="margin-top: 10px; font-size: 16px;">
@@ -135,6 +136,7 @@
         const scanBtn = document.getElementById('scanBtn');
         const addUserBtn = document.getElementById('addUserBtn');
         const userMsg = document.getElementById('userMsg');
+        const faceBtn = document.getElementById('faceBtn');
 
 
         // set default tanggal = hari ini
@@ -277,6 +279,10 @@
             window.open('./scanner.html', '_blank');
             // jika masih kena cache SW saat pengembangan:
             // window.open('./scanner.html?v=' + Date.now(), '_blank');
+        };
+
+        faceBtn.onclick = () => {
+            window.open('./face-api.html', '_blank');
         };
 
         addUserBtn.onclick = async () => {

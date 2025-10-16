@@ -1,10 +1,12 @@
-const CACHE = 'qr-scan-v16';
+const CACHE = 'qr-scan-v17';
 const PRECACHE = [
     './',
     './index.html',
     './scanner.html',
     './admin.html',
+    './face-api.html',
     './js/auth.js',
+    './js/face-api-page.js',
     './manifest.json',
     './users.json',
     './icons/logo.png',

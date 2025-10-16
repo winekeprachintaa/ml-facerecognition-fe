@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="id">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Pencocokan Wajah — face-api.js</title>
+    <link rel="manifest" href="./manifest.json" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-size='44'%3E🙂%3C/text%3E%3C/svg%3E">
+
+    <!-- face-api.js tanpa tensorflow -->
+    <script src="https://cdn.jsdelivr.net/npm/face-api-without-tensorflow@1.0.0/dist/face-api.min.js" defer></script>
+
+    <!-- auth guard (opsional, mengikuti halaman lain) -->
+    <script src="./js/auth.js" defer></script>
+
+    <!-- logika halaman -->
+    <script src="./js/face-api-page.js" defer></script>
+
+    <style>
+        body {
+            font-family: system-ui, Arial, sans-serif;
+            padding: 18px;
+            max-width: 960px;
+            margin: auto;
+            color: #111827;
+        }
+
+        h1 {
+            margin-bottom: 4px;
+        }
+
+        .small {
+            color: #4b5563;
+            font-size: .95rem;
+        }
+
+        .card {
+            border: 1px solid #e5e7eb;
+            border-radius: 14px;
+            padding: 16px;
+            margin-top: 18px;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+            background: #fff;
+        }
+
+        .cam-wrap {
+            position: relative;
+            aspect-ratio: 3 / 4;
+            width: min(100%, 520px);
+            border-radius: 12px;
+            overflow: hidden;
+            background: #000;
+        }
+
+        video,
+        canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        canvas {
+            pointer-events: none;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 14px;
+        }
+
+        button {
+            padding: 10px 18px;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            border: 1px solid #111827;
+            background: #111827;
+            color: #fff;
+            transition: filter .18s ease;
+        }
+
+        button:disabled {
+            filter: grayscale(1);
+            cursor: not-allowed;
+            opacity: .7;
+        }
+
+        button.outline {
+            background: #fff;
+            color: #111827;
+        }
+
+        pre {
+            font-family: ui-monospace, SFMono-Regular, SFMono, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: .85rem;
+            background: #f3f4f6;
+            padding: 12px;
+            border-radius: 10px;
+            overflow-x: auto;
+            margin-top: 14px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>Pencocokan Wajah</h1>
+    <p class="small">Halaman percobaan menggunakan <code>face-api.js</code> varian tanpa TensorFlow. Klik mulai kamera lalu tunggu model selesai dimuat.</p>
+
+    <div class="card">
+        <div class="cam-wrap">
+            <video id="video" autoplay muted playsinline></video>
+            <canvas id="overlay"></canvas>
+        </div>
+
+        <div class="controls">
+            <button id="startBtn">Mulai Kamera</button>
+            <button id="stopBtn" class="outline" disabled>Hentikan</button>
+            <button id="markBtn" class="outline" disabled>Rekam Wajah Rujukan</button>
+            <button id="clearBtn" class="outline" disabled>Reset Rujukan</button>
+        </div>
+
+        <p id="statusLine" class="small">Menunggu skrip <code>face-api</code> dimuat…</p>
+
+        <pre id="debugLog" hidden></pre>
+    </div>
+</body>
+</html>
