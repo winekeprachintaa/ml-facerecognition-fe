@@ -14,9 +14,24 @@
 
     <!-- auth (untuk who/guard) -->
     <script src="./js/auth.js?v=1" defer></script>
-    
+
     <!-- onnxruntime-web -->
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+    <!--<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>-->
+    <!-- TensorFlow.js 4.x -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js?v=420" defer></script>
+    <!-- Fork face-api yang kompatibel TFJS 4.x -->
+    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.10/dist/face-api.min.js?v=1710" defer></script>
+
+    <!-- backend wasm untuk fallback mobile -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.20.0/dist/tf-backend-wasm.js" defer></script>
+    <script defer>
+        // beritahu tfjs lokasi file .wasm
+        window.addEventListener('DOMContentLoaded', () => {
+            if (window.tf && tf.wasm?.setWasmPaths) {
+                tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@4.20.0/dist/');
+            }
+        });
+    </script>
 
     <!-- scanner logic (punya kamu) -->
     <script src="./js/scanner.js?v=6" defer></script>

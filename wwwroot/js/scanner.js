@@ -1,5 +1,26 @@
 // ================== CONFIG  ==================
 window.QR_CFG = window.QR_CFG || {};
+
+// ===== Engine Face Detection =====
+const ENGINE = 'faceapi'; // 'faceapi' | 'onnx' | 'none'
+const FACEAPI_MODELS_URL = './models';     // folder model face-api
+const MODEL_URL = 'models/best.onnx';      // jika nanti pakai onnx
+
+// Sembunyikan warning kernel duplikat TensorFlow.js
+const _warn = console.warn;
+console.warn = function (...args) {
+    if (typeof args[0] === 'string' && args[0].includes("kernel") && args[0].includes("already registered")) return;
+    _warn.apply(console, args);
+};
+
+// State face-api
+let _noDetectSince = 0;   // timestamp ms ketika mulai tidak ada deteksi
+let faReady = false;
+let faOpts = null;             // TinyFaceDetectorOptions
+let faBusy = false;
+let fdRunningEvery = 6;        // jalankan deteksi tiap N frame
+let _fdFrame = 0;
+
 window.QR_CFG.PUBLIC_KEY_PEM = window.QR_CFG.PUBLIC_KEY_PEM || `-----BEGIN PUBLIC KEY-----
 MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEST+CuutOqfMDM3w3uB3ewzrmgHFj
 fzTShYZBlcbR1Z6qdpC8l3IiYVW+RmSsHaq8S7zdBSzDT5JTUuNgBtMTOA==
@@ -52,12 +73,9 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
             ttl.textContent = heading ?? (isValid ? 'VALID' : 'INVALID!');
             text.textContent = msgText ?? '';
 
-            // mainkan bunyi (jika ada), tapi JANGAN pakai `catch {}` (keyword)
+            // mainkan bunyi (opsional)
             const s = isValid ? okS : ngS;
-            if (s && typeof s.play === 'function') {
-                // play() mengembalikan Promise; aman ditangani .catch(() => {})
-                s.play().catch(() => { });
-            }
+            if (s && typeof s.play === 'function') s.play().catch(() => { });
 
             // tampilkan & blok scanning sementara
             pop.classList.add('show');
@@ -71,7 +89,6 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
             const t = setTimeout(close, AUTO_CLOSE_MS);
             okBtn?.addEventListener('click', () => { clearTimeout(t); close(); }, { once: true });
         }
-
 
         const setStatus = (t, cls) => {
             resultText.textContent = t;
@@ -194,14 +211,13 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
                     return;
                 }
 
-                // 1) aturan bisnis (cek format, tanggal hari ini, ENFORCE_ID_MATCH, dll.)
+                // 1) aturan bisnis
                 const rules = validateRules(obj);
 
-                // 2) verifikasi kriptografi (true | false | null jika PUBLIC_KEY kosong)
+                // 2) verifikasi kripto
                 const vcrypto = await verifySignature(obj);
 
-                // 3) Keputusan & pesan:
-                //    -> INVALID jika SALAH SATU gagal (signature ATAU rules)
+                // 3) Keputusan
                 let label = '';
                 let cls = 'invalid';
 
@@ -218,17 +234,11 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
                 }
                 setStatus(label, cls);
 
-                // TAMPILKAN MODAL + auto scan ulang (tanpa refresh)
+                // popup
                 const isValid = (cls === 'valid');
                 showResultModal(isValid, isValid ? 'VALID' : 'INVALID!');
 
-                // 4) tampilkan JSON + alasan aturan (jika ada)
-                //parsedJson.textContent = JSON.stringify(
-                //    rules.ok ? obj : { ...obj, _rules: rules.reasons },
-                //    null, 2
-                //);
-
-                // 5) debug ringkas
+                // debug ringkas
                 if (obj?.id && obj?.date) {
                     console.debug('[QR]', `${obj.id}|${obj.date}`, '→', obj._verified_with || '(unverified)');
                 }
@@ -253,23 +263,64 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
             return c;
         }
 
+        // ===== Face-api init
+        async function initFaceApi() {
+            if (faReady) return;
+
+            await faceapi.nets.tinyFaceDetector.loadFromUri(FACEAPI_MODELS_URL);
+
+            const t = faceapi.tf || window.tf;
+            if (!t) throw new Error('TensorFlowJS tidak ditemukan');
+
+            // deteksi perangkat mobile sederhana
+            const ua = navigator.userAgent.toLowerCase();
+            const isMobile = /iphone|ipad|ipod|android/.test(ua);
+
+            // urutan backend (mobile cenderung WASM dulu)
+            const order = isMobile ? ['wasm', 'webgl', 'cpu'] : ['webgl', 'wasm', 'cpu'];
+
+            let picked = null;
+            for (const b of order) {
+                try {
+                    await t.setBackend(b);
+                    await t.ready();
+                    picked = t.getBackend?.() || b;
+                    break;
+                } catch (_) { /* coba berikutnya */ }
+            }
+            console.log('[faceapi] backend =', picked);
+
+            faOpts = new faceapi.TinyFaceDetectorOptions({
+                inputSize: isMobile ? 224 : 320,   // lebih ringan di HP
+                scoreThreshold: 0.5
+            });
+
+            faReady = true;
+        }
+
+
         // ===== Camera
         async function startCamera() {
             try {
                 if (!navigator.mediaDevices?.getUserMedia) throw new Error('getUserMedia tidak didukung');
+
+                // gunakan var luar (supaya stop bisa menghentikan)
                 stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
                 video.srcObject = stream;
 
                 await new Promise(res => {
-                    const onMeta = () => { video.removeEventListener('loadedmetadata', onMeta); res(); };
-                    if (video.readyState >= 1) res(); else video.addEventListener('loadedmetadata', onMeta, { once: true });
+                    if (video.readyState >= 1) res();
+                    else video.addEventListener('loadedmetadata', () => res(), { once: true });
                 });
                 await video.play();
 
-                // load model di background
-                initFaceModel().catch(e => console.warn('init model err', e));
+                // load engine di background
+                if (ENGINE === 'faceapi') initFaceApi().catch(e => console.warn('init faceapi err', e));
+                if (ENGINE === 'onnx') initFaceModel?.().catch?.(e => console.warn('init onnx err', e));
 
-                startBtn.disabled = true; stopBtn.disabled = false; scanning = true;
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                scanning = true;
                 scanLoop();
             } catch (e) {
                 console.error(e);
@@ -282,49 +333,71 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
             startBtn.disabled = false; stopBtn.disabled = true;
             fctx.clearRect(0, 0, faceCanvas.width, faceCanvas.height);
         }
+
         async function scanLoop() {
             if (!scanning) return;
             try {
                 if (video.readyState >= 2) {
                     const w = video.videoWidth, h = video.videoHeight;
                     if (w && h) {
-                        // sinkron DPR kedua kanvas + ambil ctx terbaru
+                        // sinkron DPR + ctx terbaru
                         ctx = syncCanvas(canvas, w, h);
                         fctx = syncCanvas(faceCanvas, w, h);
 
                         // gambar frame video ke qrCanvas
                         ctx.drawImage(video, 0, 0, w, h);
 
-                        // ===== FACE DETECTION (throttle tiap N frame)
+                        // ========= FACE DETECTION =========
                         _fdFrame = (_fdFrame + 1) | 0;
-                        if (fdSession && !fdBusy && (_fdFrame % fdRunningEvery === 0)) {
-                            fdBusy = true;
+
+                        if (ENGINE === 'faceapi' && faReady && !faBusy && (_fdFrame % fdRunningEvery === 0)) {
+                            faBusy = true;
                             try {
-                                const lb = letterbox(canvas, fdInputSize);
-                                lb.srcW = w; lb.srcH = h;
+                                const detections = await faceapi.detectAllFaces(video, faOpts); // array of {box:{x,y,width,height}, score}
 
-                                const input = toTensorCHW(lb.canvas);
-                                const feeds = {};
-                                const inputName = (fdSession.inputNames && fdSession.inputNames[0]) || 'images';
-                                feeds[inputName] = input;
+                                const t = faceapi.tf || window.tf;
+                                const count = detections?.length || 0;
 
-                                const outMap = await fdSession.run(feeds);
-
-                                let outTensor = null;
-                                for (const k of Object.keys(outMap)) {
-                                    const t = outMap[k], d = t?.dims;
-                                    if (d && d.length === 3 && d[0] === 1 && d[2] === 6) { outTensor = t; break; }
+                                // watchdog: jika 0 deteksi selama > 3 detik dan backend bukan 'wasm' → pindah ke wasm
+                                const nowTs = performance.now();
+                                if (count === 0) {
+                                    if (!_noDetectSince) _noDetectSince = nowTs;
+                                    if (nowTs - _noDetectSince > 3000 && t?.getBackend?.() !== 'wasm') {
+                                        try { await t.setBackend('wasm'); await t.ready(); console.log('[faceapi] switched → wasm'); }
+                                        catch { }
+                                        _noDetectSince = 0; // reset
+                                    }
+                                } else {
+                                    _noDetectSince = 0;
                                 }
-                                if (!outTensor) outTensor = outMap[Object.keys(outMap)[0]];
 
-                                const boxes = postprocessGeneric(outTensor, lb);
-                                drawFaces(fctx, boxes); // gambar di overlay
+                                // Konversi ke format boxes {x1,y1,x2,y2,conf}
+                                const boxes = (detections || []).map(d => ({
+                                    x1: d.box.x,
+                                    y1: d.box.y,
+                                    x2: d.box.x + d.box.width,
+                                    y2: d.box.y + d.box.height,
+                                    conf: d.score ?? 0
+                                }));
+
+                                // Gambar kotak (STROKE saja; TANPA fill)
+                                drawFaces(fctx, boxes);
+
+                                // === Kirim 1 crop terbaik ke API (throttle) ===
+                                const bestWithLabel = await maybeSendTopFace(canvas, boxes);
+                                if (bestWithLabel && bestWithLabel.label) {
+                                    lastApiLabel = String(bestWithLabel.label || 'Unknown');
+                                    lastApiExpire = performance.now() + 5000;
+                                    // gambar ulang dengan label pada kotak terbaik
+                                    drawFaces(fctx, boxes.map(b => b === bestWithLabel ? bestWithLabel : b));
+                                }
                             } catch (e) {
-                                console.warn('FD run error', e);
+                                console.warn('face-api detect error:', e);
                             } finally {
-                                fdBusy = false;
+                                faBusy = false;
                             }
                         }
+                        // ========= END FACE DETECTION =========
 
                         // ===== QR decode dari buffer aktual (hi-DPI friendly)
                         const qrW = canvas.width, qrH = canvas.height; // buffer size
@@ -369,12 +442,28 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
         window.addEventListener('pagehide', stopCamera);
     }
 
+    // ===== API Face Classification (konfigurasi) =====
+    // --- state pengen warna garis ---
+    let recogBusy = false;               // true saat masih kirim/menunggu API
+    let lastApiLabel = "";               // label terakhir dari API (mis. "Abdullah" / "Unknown")
+    let lastApiExpire = 0;               // sampai kapan label ditampilkan (ms)
+    const API_BASE = 'https://192.168.100.181:8080';   // ganti ke https:// jika web kamu https
+    const API_ROUTE = '/api/v1/recognition/check';     // contoh endpoint; sesuaikan dg API kamu
+    const API_TYPE = 'multipart';                     // 'multipart' | 'base64'
+    const API_FIELD = 'file';                          // nama field file utk multipart
+    const API_MIN_INTERVAL_MS = 900;                  // throttle panggilan API
+    let apiBusy = false, apiLastTs = 0;
+    const FACE_BOX_SCALE = 1.25;   // 1.0 = asli, 1.25 = diperbesar 25%
+    const FACE_BOX_PAD = 14;     // padding tetap (px CSS) tiap sisi
+    const FACE_BOX_KEEP_SQUARE = false; // true kalau mau persegi
+
+
+
     // ====== Face Detect (ONNX) ======
-    const MODEL_URL = 'models/best.onnx';
     let fdSession = null;
     let fdInputSize = 640;
-    let fdRunningEvery = 6;
-    let _fdFrame = 0, fdBusy = false;
+    let fdRunningEveryOnnx = 6; // (biarkan beda nama agar tidak bentrok)
+    let _fdFrameOnnx = 0, fdBusyOnnx = false;
 
     async function initFaceModel() {
         if (fdSession) return;
@@ -386,7 +475,6 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
         console.timeEnd('onnx-load');
         console.log('ONNX inputs:', fdSession.inputNames, 'outputs:', fdSession.outputNames);
 
-        // warmup (non-fatal jika nama input beda)
         const dummy = new ort.Tensor('float32', new Float32Array(fdInputSize * fdInputSize * 3), [1, 3, fdInputSize, fdInputSize]);
         try {
             const feeds = {};
@@ -422,14 +510,14 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
         }
         return new ort.Tensor('float32', float, [1, 3, h, w]);
     }
-     
+
     let _loggedDims = false;
     function postprocessGeneric(tensor, meta) {
         const dims = tensor.dims;
         if (!_loggedDims) { console.log('ONNX output dims:', dims); _loggedDims = true; }
 
         const D = dims, data = tensor.data;
-        const TH = 0.25, S = meta.size || 640; 
+        const TH = 0.25, S = meta.size || 640;
         const boxes = [];
 
         // ===== Layout A: [1, N, 6] => [x1, y1, x2, y2, conf, cls] =====
@@ -437,14 +525,12 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
             const N = D[1], C = D[2];
             for (let i = 0; i < N; i++) {
                 const off = i * C;
-                // BACA SEBAGAI KOTAK SUDUT: x1,y1,x2,y2
                 let x1l = data[off + 0], y1l = data[off + 1];
                 let x2l = data[off + 2], y2l = data[off + 3];
                 let conf = data[off + 4];
 
                 if (!Number.isFinite(conf) || conf < 0.25) continue;
 
-                // jika output ternormalisasi (0..1), skala ke piksel letterbox S
                 const S = meta.size || 640;
                 const maybeNorm =
                     Math.max(Math.abs(x1l), Math.abs(y1l), Math.abs(x2l), Math.abs(y2l)) <= 1.5;
@@ -452,16 +538,13 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
                     x1l *= S; y1l *= S; x2l *= S; y2l *= S;
                 }
 
-                // pastikan urutan min->max
                 if (x2l < x1l) [x1l, x2l] = [x2l, x1l];
                 if (y2l < y1l) [y1l, y2l] = [y2l, y1l];
 
-                // unletterbox ke koordinat video
                 const { r, dx, dy, srcW, srcH } = meta;
                 let x1 = (x1l - dx) / r, y1 = (y1l - dy) / r;
                 let x2 = (x2l - dx) / r, y2 = (y2l - dy) / r;
 
-                // clamp & buang kotak terlalu kecil
                 x1 = Math.max(0, Math.min(srcW, x1));
                 y1 = Math.max(0, Math.min(srcH, y1));
                 x2 = Math.max(0, Math.min(srcW, x2));
@@ -537,17 +620,221 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
     function drawFaces(fctx, boxes) {
         fctx.clearRect(0, 0, fctx.canvas.width, fctx.canvas.height);
         if (!boxes || !boxes.length) return;
+
+        const now = performance.now();
+        const stroke = recogBusy ? '#3b82f6' : '#22c55e';
+
+        // ukuran CSS (bukan buffer); koordinat bbox kita selama ini di CSS px
+        const dpr = window.devicePixelRatio || 1;
+        const cssW = (fctx.canvas.width / dpr);
+        const cssH = (fctx.canvas.height / dpr);
+
         fctx.save();
-        fctx.lineWidth = Math.max(2, Math.round(Math.min(fctx.canvas.width, fctx.canvas.height) / 200));
-        fctx.strokeStyle = '#22c55e';
-        fctx.fillStyle = 'rgba(34,197,94,.18)';
+        fctx.lineWidth = 4;
+        fctx.strokeStyle = stroke;
+        if (recogBusy) fctx.setLineDash([8, 8]); else fctx.setLineDash([]);
+
         for (const b of boxes) {
-            const x = Math.min(b.x1, b.x2), y = Math.min(b.y1, b.y2);
-            const w = Math.max(1, Math.abs(b.x2 - b.x1));
-            const h = Math.max(1, Math.abs(b.y2 - b.y1));
-            fctx.strokeRect(x, y, w, h);
-            fctx.fillRect(x, y, w, h);
+            // ==== PERBESAR DI TEMPAT (tanpa helper) ====
+            let x1 = Math.min(b.x1, b.x2), y1 = Math.min(b.y1, b.y2);
+            let x2 = Math.max(b.x1, b.x2), y2 = Math.max(b.y1, b.y2);
+            let w = Math.max(1, x2 - x1), h = Math.max(1, y2 - y1);
+            const cx = x1 + w / 2, cy = y1 + h / 2;
+
+            // skala & padding
+            let newW = w * FACE_BOX_SCALE + 2 * FACE_BOX_PAD;
+            let newH = h * FACE_BOX_SCALE + 2 * FACE_BOX_PAD;
+            if (FACE_BOX_KEEP_SQUARE) { const s = Math.max(newW, newH); newW = newH = s; }
+
+            // pusat tetap, clamp ke batas layar (CSS)
+            x1 = Math.max(0, Math.min(cssW, cx - newW / 2));
+            y1 = Math.max(0, Math.min(cssH, cy - newH / 2));
+            x2 = Math.max(0, Math.min(cssW, cx + newW / 2));
+            y2 = Math.max(0, Math.min(cssH, cy + newH / 2));
+
+            // gambar stroke
+            const x = x1, y = y1, W = Math.max(1, x2 - x1), H = Math.max(1, y2 - y1);
+            fctx.strokeRect(x, y, W, H);
+
+            const labelToShow = b.label || ((now < lastApiExpire && lastApiLabel) ? lastApiLabel : '');
+            if (labelToShow) drawLabel(fctx, x, y, labelToShow);
+
+            // optional: simpan koordinat hasil expand agar konsisten dipakai tempat lain (tidak wajib)
+            b._ex_x1 = x1; b._ex_y1 = y1; b._ex_x2 = x2; b._ex_y2 = y2;
         }
+
         fctx.restore();
     }
+
+
+    // Badge label sederhana (background gelap, teks putih)
+    function drawLabel(ctx, x, y, text) {
+        ctx.save();
+        ctx.font = '600 16px system-ui, Arial';
+        const padX = 8, padY = 6;
+        const metrics = ctx.measureText(text);
+        const w = Math.ceil(metrics.width) + padX * 2;
+        const h = 22 + (padY - 6);
+        const bx = x, by = Math.max(0, y - h - 8);
+
+        ctx.fillStyle = 'rgba(17, 24, 39, .9)';  // #111827 semi
+        ctx.strokeStyle = 'rgba(255,255,255,.25)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(bx, by, w, h, 6); else ctx.rect(bx, by, w, h);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = '#fff';
+        ctx.fillText(text, bx + padX, by + h - padY);
+        ctx.restore();
+    }
+
+    // ======================[ PERBAIKAN CROP ]======================
+
+    // Konversi & clamp koordinat bbox (CSS pixels) -> buffer pixels.
+    function clampRoundBox(b, bufW, bufH, sx = 1, sy = 1, mirrored = false) {
+        // b: {x1,y1,x2,y2} pada ruang CSS pixel (yang sama untuk overlay)
+        let x1 = Math.min(b.x1, b.x2) * sx;
+        let y1 = Math.min(b.y1, b.y2) * sy;
+        let x2 = Math.max(b.x1, b.x2) * sx;
+        let y2 = Math.max(b.y1, b.y2) * sy;
+
+        // clamp ke buffer
+        x1 = Math.max(0, Math.min(bufW, x1));
+        y1 = Math.max(0, Math.min(bufH, y1));
+        x2 = Math.max(0, Math.min(bufW, x2));
+        y2 = Math.max(0, Math.min(bufH, y2));
+
+        let w = Math.max(1, Math.round(x2 - x1));
+        let h = Math.max(1, Math.round(y2 - y1));
+        let x = Math.round(x1), y = Math.round(y1);
+
+        // Jika sumber video dimirror secara visual (CSS transform: scaleX(-1))
+        if (mirrored) x = (bufW - x) - w;
+
+        return { x, y, w, h };
+    }
+
+    // Crop dari frame-canvas -> Blob, dengan konversi CSS→buffer otomatis
+    function cropFaceToBlob(srcCanvas, box, type = 'image/jpeg', quality = 0.9, mirrored = false) {
+        // Hitung skala antara CSS pixel & buffer pixel
+        // style.width/height ada dalam "px", contoh "1280px"
+        const cssW = parseFloat(srcCanvas.style.width) || srcCanvas.width;
+        const cssH = parseFloat(srcCanvas.style.height) || srcCanvas.height;
+        const bufW = srcCanvas.width;
+        const bufH = srcCanvas.height;
+        const scaleX = bufW / cssW;
+        const scaleY = bufH / cssH;
+
+        const { x, y, w, h } = clampRoundBox(box, bufW, bufH, scaleX, scaleY, mirrored);
+
+        // OffscreenCanvas jika ada (lebih cepat), fallback <canvas>
+        const tmp = (typeof OffscreenCanvas !== 'undefined')
+            ? new OffscreenCanvas(w, h)
+            : Object.assign(document.createElement('canvas'), { width: w, height: h });
+
+        const c2 = tmp.getContext('2d');
+        c2.drawImage(srcCanvas, x, y, w, h, 0, 0, w, h);
+
+        if (tmp.convertToBlob) return tmp.convertToBlob({ type, quality });
+        return new Promise(resolve => tmp.toBlob(resolve, type, quality));
+    }
+
+    // =============================================================
+
+    function downloadBlob(blob, filename = 'download.jpg') {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;            // nama file lokal
+        document.body.appendChild(a);     // Safari iOS kadang perlu di-DOM
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);         // bersih-bersih
+    }
+
+    async function callApiWithBlob(blob) {
+        // gunakan proxy/URL milikmu
+        downloadBlob(blob, 'face.jpg'); // untuk debugging, bisa dihapus
+        const url = '/proxy/api/v1/recognition/check';
+        const fd = new FormData();
+        fd.append('file', blob, 'face.jpg');
+
+        recogBusy = true;
+        try {
+            const res = await fetch(url, { method: 'POST', body: fd, cache: 'no-store' });
+            if (!res.ok) throw new Error('API fail ' + res.status);
+            const json = await res.json();
+            return json;
+        } finally {
+            recogBusy = false;
+        }
+    }
+
+    function parseApiLabel(json) {
+        const label =
+            json?.data?.entity?.label ??
+            json?.data?.label ??
+            json?.label ??
+            'Unknown';
+
+        let score;
+        const d = json?.data?.distance;
+        if (typeof d === 'number' && isFinite(d)) score = Math.max(0, Math.min(1, 1 / (1 + d)));
+        return { label, score };
+    }
+
+    async function maybeSendTopFace(canvasForCrop, boxes) {
+        const now = Date.now();
+        if (apiBusy || now - apiLastTs < API_MIN_INTERVAL_MS) return null;
+        if (!boxes || !boxes.length) return null;
+
+        const best = boxes.reduce((a, b) => (a.conf > b.conf ? a : b));
+
+        try {
+            apiBusy = true; apiLastTs = now;
+
+            // ==== PERBESAR DI TEMPAT (inline) ====
+            const dpr = window.devicePixelRatio || 1;
+            const cssW = (canvasForCrop.width / dpr);
+            const cssH = (canvasForCrop.height / dpr);
+
+            let x1 = Math.min(best.x1, best.x2), y1 = Math.min(best.y1, best.y2);
+            let x2 = Math.max(best.x1, best.x2), y2 = Math.max(best.y1, best.y2);
+            let w = Math.max(1, x2 - x1), h = Math.max(1, y2 - y1);
+            const cx = x1 + w / 2, cy = y1 + h / 2;
+
+            let newW = w * FACE_BOX_SCALE + 2 * FACE_BOX_PAD;
+            let newH = h * FACE_BOX_SCALE + 2 * FACE_BOX_PAD;
+            if (FACE_BOX_KEEP_SQUARE) { const s = Math.max(newW, newH); newW = newH = s; }
+
+            x1 = Math.max(0, Math.min(cssW, cx - newW / 2));
+            y1 = Math.max(0, Math.min(cssH, cy - newH / 2));
+            x2 = Math.max(0, Math.min(cssW, cx + newW / 2));
+            y2 = Math.max(0, Math.min(cssH, cy + newH / 2));
+
+            const expanded = { x1, y1, x2, y2, conf: best.conf, label: best.label };
+
+            // crop pakai koordinat yg sudah diperbesar (cropFaceToBlob tetap)
+            const blob = await cropFaceToBlob(canvasForCrop, expanded);
+
+            const json = await callApiWithBlob(blob);
+            const { label } = parseApiLabel(json);
+            lastApiLabel = String(label || 'Unknown');
+            lastApiExpire = performance.now() + 5000;
+
+            expanded.label = lastApiLabel;   // supaya drawFaces bisa tampilkan label spesifik
+            return expanded;
+        } catch (e) {
+            console.warn('API error:', e);
+            lastApiLabel = 'Unknown';
+            lastApiExpire = performance.now() + 3000;
+            return null;
+        } finally {
+            apiBusy = false;
+        }
+    }
+
+
 })();
