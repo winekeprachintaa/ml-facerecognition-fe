@@ -743,7 +743,7 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
 
     // =============================================================
 
-    function downloadBlob(blob, filename = 'download.jpg') {
+/*    function downloadBlob(blob, filename = 'download.jpg') {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -753,7 +753,7 @@ if (typeof window.QR_CFG.ENFORCE_ID_MATCH === 'undefined') {
         a.remove();
         URL.revokeObjectURL(url);         // bersih-bersih
     }
-
+*/
     async function callApiWithBlob(blob) {
         // gunakan proxy/URL milikmu
         downloadBlob(blob, 'face.jpg'); // untuk debugging, bisa dihapus
